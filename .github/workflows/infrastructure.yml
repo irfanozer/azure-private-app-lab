@@ -1,0 +1,59 @@
+name: Azure infrastructure caller
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "infra/**"
+      - ".github/actions/**"
+      - ".github/workflows/**"
+
+  push:
+    branches: [main]
+    paths:
+      - "infra/**"
+      - ".github/actions/**"
+      - ".github/workflows/**"
+
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Plan is free of changes; apply creates billable Azure resources after approval
+        required: true
+        type: choice
+        default: plan
+        options:
+          - plan
+          - apply
+
+permissions: {}
+
+jobs:
+  terraform:
+    name: Call central-style Terraform workflow
+    permissions:
+      contents: read
+      id-token: write
+
+    # This lock spans plan, human approval, and apply. A newer run cannot cancel
+    # an in-progress infrastructure change.
+    concurrency:
+      group: azure-private-app-dev
+      cancel-in-progress: false
+
+    uses: $/.github/workflows/reusable-azure-terraform.yml
+    with:
+      working_directory: infra/environments/dev
+      terraform_version: "1.15.5"
+      operation: ${{ github.event_name == 'workflow_dispatch' && inputs.operation || 'plan' }}
+      plan_environment: terraform-plan
+      apply_environment: development
+      azure_tenant_id: ${{ vars.AZURE_TENANT_ID }}
+      azure_subscription_id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      plan_client_id: ${{ vars.AZURE_PLAN_CLIENT_ID }}
+      apply_client_id: ${{ vars.AZURE_APPLY_CLIENT_ID }}
+      resource_group_name: ${{ vars.AZURE_LAB_RESOURCE_GROUP }}
+      state_storage_account: ${{ vars.TF_STATE_STORAGE_ACCOUNT }}
+      state_container: ${{ vars.TF_STATE_CONTAINER }}
+      state_key: azure-private-app-dev.tfstate
+      enable_private_dns_resolver: ${{ vars.ENABLE_PRIVATE_DNS_RESOLVER == 'true' }}

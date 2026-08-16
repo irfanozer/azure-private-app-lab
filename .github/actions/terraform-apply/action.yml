@@ -1,0 +1,31 @@
+name: Terraform apply saved plan
+description: Apply the exact Terraform plan produced by the preceding plan job
+
+inputs:
+  working_directory:
+    description: Path to the Terraform root module
+    required: true
+  terraform_version:
+    description: Exact Terraform CLI version used to create the plan
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Install the exact Terraform version
+      uses: hashicorp/setup-terraform@v4
+      with:
+        terraform_version: ${{ inputs.terraform_version }}
+        terraform_wrapper: false
+
+    - name: Apply approved plan
+      shell: bash
+      env:
+        TF_WORKING_DIRECTORY: ${{ inputs.working_directory }}
+      run: |
+        test -f "$TF_WORKING_DIRECTORY/tfplan"
+        terraform -chdir="$TF_WORKING_DIRECTORY" apply \
+          -input=false \
+          -no-color \
+          tfplan
+

@@ -1,0 +1,24 @@
+# Terraform working data and local plans
+**/.terraform/**
+**/*.tfstate
+**/*.tfstate.*
+**/tfplan
+**/tfplan.*
+crash.log
+crash.*.log
+
+# Local variable files may contain environment-specific values
+**/*.auto.tfvars
+**/*.auto.tfvars.json
+**/terraform.tfvars
+!**/terraform.tfvars.example
+
+# Bootstrap output contains identifiers (not secrets), but is machine-specific
+bootstrap-output.json
+
+# Editor and operating-system files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+.tmp/

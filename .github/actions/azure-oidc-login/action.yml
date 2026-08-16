@@ -1,0 +1,33 @@
+name: Azure OIDC login
+description: Authenticate to Azure with a federated identity and no stored client secret
+
+inputs:
+  client_id:
+    description: Client ID of the user-assigned managed identity trusted by GitHub OIDC
+    required: true
+  tenant_id:
+    description: Microsoft Entra tenant ID
+    required: true
+  subscription_id:
+    description: Azure subscription ID
+    required: true
+
+runs:
+  using: composite
+  steps:
+    # Vendor action called from an internally maintained composite action.
+    # Major tags keep this learning lab readable. Pin a reviewed full commit SHA
+    # in production; Dependabot is configured to propose updates.
+    - name: Log in to Azure with GitHub OIDC
+      uses: azure/login@v3
+      with:
+        client-id: ${{ inputs.client_id }}
+        tenant-id: ${{ inputs.tenant_id }}
+        subscription-id: ${{ inputs.subscription_id }}
+
+    - name: Verify the Azure session
+      shell: bash
+      env:
+        AZURE_CORE_OUTPUT: none
+      run: az account show --output none
+

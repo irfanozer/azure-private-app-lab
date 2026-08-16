@@ -1,0 +1,74 @@
+name: Terraform plan
+description: Initialize the Azure backend and produce a saved normal or destroy plan
+
+inputs:
+  working_directory:
+    description: Path to the Terraform root module
+    required: true
+  terraform_version:
+    description: Exact Terraform CLI version
+    required: true
+  operation:
+    description: plan, apply, or destroy
+    required: true
+  state_storage_account:
+    description: Azure Storage account containing Terraform state
+    required: true
+  state_container:
+    description: Blob container containing Terraform state
+    required: true
+  state_key:
+    description: Blob name for this environment's state
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Install Terraform
+      uses: hashicorp/setup-terraform@v4
+      with:
+        terraform_version: ${{ inputs.terraform_version }}
+        terraform_wrapper: false
+
+    - name: Initialize Azure remote state
+      shell: bash
+      env:
+        TF_WORKING_DIRECTORY: ${{ inputs.working_directory }}
+        TF_STATE_STORAGE_ACCOUNT: ${{ inputs.state_storage_account }}
+        TF_STATE_CONTAINER: ${{ inputs.state_container }}
+        TF_STATE_KEY: ${{ inputs.state_key }}
+      run: |
+        terraform -chdir="$TF_WORKING_DIRECTORY" init \
+          -input=false \
+          -lockfile=readonly \
+          -backend-config="use_oidc=true" \
+          -backend-config="use_azuread_auth=true" \
+          -backend-config="storage_account_name=$TF_STATE_STORAGE_ACCOUNT" \
+          -backend-config="container_name=$TF_STATE_CONTAINER" \
+          -backend-config="key=$TF_STATE_KEY"
+
+    - name: Create saved plan
+      shell: bash
+      env:
+        TF_WORKING_DIRECTORY: ${{ inputs.working_directory }}
+        TF_OPERATION: ${{ inputs.operation }}
+      run: |
+        case "$TF_OPERATION" in
+          plan|apply)
+            destroy_argument=()
+            ;;
+          destroy)
+            destroy_argument=(-destroy)
+            ;;
+          *)
+            echo "Unsupported operation: $TF_OPERATION" >&2
+            exit 1
+            ;;
+        esac
+
+        terraform -chdir="$TF_WORKING_DIRECTORY" plan \
+          -input=false \
+          -no-color \
+          "${destroy_argument[@]}" \
+          -out=tfplan
+

@@ -1,0 +1,17 @@
+# Copy this file to terraform.tfvars only for local experimentation.
+# GitHub Actions supplies subscription_id and resource_group_name through
+# TF_VAR_* environment variables, so the CI pipeline does not need this file.
+
+subscription_id    = "00000000-0000-0000-0000-000000000000"
+resource_group_name = "rg-ghazdemo-dev"
+name_prefix         = "ghazdemo"
+environment         = "dev"
+
+# This is intentionally false. Resolver inbound/outbound endpoints are billed
+# continuously and are not required for resources in the same linked VNet.
+enable_private_dns_resolver = false
+
+tags = {
+  owner = "your-name"
+}
+

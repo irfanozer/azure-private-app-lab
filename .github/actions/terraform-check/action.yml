@@ -1,0 +1,42 @@
+name: Terraform static checks
+description: Install Terraform, verify formatting, initialize without state, and validate
+
+inputs:
+  working_directory:
+    description: Path to the Terraform root module
+    required: true
+  terraform_version:
+    description: Exact Terraform CLI version
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Install Terraform
+      uses: hashicorp/setup-terraform@v4
+      with:
+        terraform_version: ${{ inputs.terraform_version }}
+        terraform_wrapper: false
+
+    - name: Check formatting
+      shell: bash
+      env:
+        TF_WORKING_DIRECTORY: ${{ inputs.working_directory }}
+      run: terraform -chdir="$TF_WORKING_DIRECTORY" fmt -check -recursive
+
+    - name: Initialize without remote state
+      shell: bash
+      env:
+        TF_WORKING_DIRECTORY: ${{ inputs.working_directory }}
+      run: |
+        terraform -chdir="$TF_WORKING_DIRECTORY" init \
+          -backend=false \
+          -input=false \
+          -lockfile=readonly
+
+    - name: Validate configuration
+      shell: bash
+      env:
+        TF_WORKING_DIRECTORY: ${{ inputs.working_directory }}
+      run: terraform -chdir="$TF_WORKING_DIRECTORY" validate -no-color
+

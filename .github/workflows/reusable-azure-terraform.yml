@@ -1,0 +1,199 @@
+name: Reusable Azure Terraform
+
+on:
+  workflow_call:
+    inputs:
+      working_directory:
+        description: Path to the Terraform root module in the caller repository
+        required: true
+        type: string
+      terraform_version:
+        description: Exact Terraform CLI version
+        required: true
+        type: string
+      operation:
+        description: plan, apply, or destroy
+        required: true
+        type: string
+      plan_environment:
+        description: GitHub Environment trusted by the read-oriented Azure identity
+        required: true
+        type: string
+      apply_environment:
+        description: Protected GitHub Environment trusted by the write Azure identity
+        required: true
+        type: string
+      azure_tenant_id:
+        required: true
+        type: string
+      azure_subscription_id:
+        required: true
+        type: string
+      plan_client_id:
+        description: Client ID of the read-oriented user-assigned managed identity
+        required: true
+        type: string
+      apply_client_id:
+        description: Client ID of the write-capable user-assigned managed identity
+        required: true
+        type: string
+      resource_group_name:
+        description: Pre-created resource group managed by this Terraform root
+        required: true
+        type: string
+      state_storage_account:
+        required: true
+        type: string
+      state_container:
+        required: true
+        type: string
+      state_key:
+        required: true
+        type: string
+      enable_private_dns_resolver:
+        description: Enable the continuously billed hybrid-DNS resolver endpoints
+        required: false
+        default: false
+        type: boolean
+
+permissions: {}
+
+jobs:
+  validate:
+    name: Static Terraform validation
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+
+    steps:
+      - name: Check out caller repository
+        uses: actions/checkout@v6
+
+      - name: Run internal static-check composite action
+        uses: $/.github/actions/terraform-check
+        with:
+          working_directory: ${{ inputs.working_directory }}
+          terraform_version: ${{ inputs.terraform_version }}
+
+  plan:
+    name: Plan with read-oriented Azure identity
+    needs: validate
+    runs-on: ubuntu-24.04
+
+    # Fork code must not receive a cloud identity or access Terraform state.
+    if: >-
+      ${{
+        github.event_name != 'pull_request' ||
+        github.event.pull_request.head.repo.full_name == github.repository
+      }}
+
+    environment:
+      name: ${{ inputs.plan_environment }}
+
+    permissions:
+      contents: read
+      id-token: write
+
+    env:
+      TF_IN_AUTOMATION: "true"
+      TF_INPUT: "false"
+      ARM_USE_OIDC: "true"
+      ARM_USE_AZUREAD: "true"
+      ARM_CLIENT_ID: ${{ inputs.plan_client_id }}
+      ARM_TENANT_ID: ${{ inputs.azure_tenant_id }}
+      ARM_SUBSCRIPTION_ID: ${{ inputs.azure_subscription_id }}
+      TF_VAR_subscription_id: ${{ inputs.azure_subscription_id }}
+      TF_VAR_resource_group_name: ${{ inputs.resource_group_name }}
+      TF_VAR_enable_private_dns_resolver: ${{ inputs.enable_private_dns_resolver }}
+      AZURE_CORE_OUTPUT: none
+
+    steps:
+      - name: Check out caller repository
+        uses: actions/checkout@v6
+
+      - name: Authenticate with the internal OIDC composite action
+        uses: $/.github/actions/azure-oidc-login
+        with:
+          client_id: ${{ inputs.plan_client_id }}
+          tenant_id: ${{ inputs.azure_tenant_id }}
+          subscription_id: ${{ inputs.azure_subscription_id }}
+
+      - name: Create plan with the internal Terraform composite action
+        uses: $/.github/actions/terraform-plan
+        with:
+          working_directory: ${{ inputs.working_directory }}
+          terraform_version: ${{ inputs.terraform_version }}
+          operation: ${{ inputs.operation }}
+          state_storage_account: ${{ inputs.state_storage_account }}
+          state_container: ${{ inputs.state_container }}
+          state_key: ${{ inputs.state_key }}
+
+      # The initialized workspace includes the plan, provider plugins, and
+      # module paths. Keeping them together ensures apply executes what plan
+      # reviewed. Plan files may contain sensitive values, hence one-day expiry.
+      - name: Package exact planned workspace
+        shell: bash
+        run: |
+          tar --exclude=.git \
+            -czf "$RUNNER_TEMP/terraform-workspace.tgz" \
+            -C "$GITHUB_WORKSPACE" .
+
+      - name: Upload immutable plan artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: terraform-plan-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/terraform-workspace.tgz
+          if-no-files-found: error
+          retention-days: 1
+
+  apply:
+    name: Apply after protected-environment approval
+    if: inputs.operation != 'plan'
+    needs: plan
+    runs-on: ubuntu-24.04
+
+    environment:
+      name: ${{ inputs.apply_environment }}
+
+    permissions:
+      contents: read
+      id-token: write
+
+    env:
+      TF_IN_AUTOMATION: "true"
+      TF_INPUT: "false"
+      ARM_USE_OIDC: "true"
+      ARM_USE_AZUREAD: "true"
+      ARM_CLIENT_ID: ${{ inputs.apply_client_id }}
+      ARM_TENANT_ID: ${{ inputs.azure_tenant_id }}
+      ARM_SUBSCRIPTION_ID: ${{ inputs.azure_subscription_id }}
+      TF_VAR_subscription_id: ${{ inputs.azure_subscription_id }}
+      TF_VAR_resource_group_name: ${{ inputs.resource_group_name }}
+      TF_VAR_enable_private_dns_resolver: ${{ inputs.enable_private_dns_resolver }}
+      AZURE_CORE_OUTPUT: none
+
+    steps:
+      - name: Authenticate with write-capable OIDC identity
+        uses: $/.github/actions/azure-oidc-login
+        with:
+          client_id: ${{ inputs.apply_client_id }}
+          tenant_id: ${{ inputs.azure_tenant_id }}
+          subscription_id: ${{ inputs.azure_subscription_id }}
+
+      - name: Download plan from this workflow run
+        uses: actions/download-artifact@v8
+        with:
+          name: terraform-plan-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/terraform-plan
+
+      - name: Restore exact planned workspace
+        shell: bash
+        run: |
+          tar -xzf "$RUNNER_TEMP/terraform-plan/terraform-workspace.tgz" \
+            -C "$GITHUB_WORKSPACE"
+
+      - name: Apply the approved saved plan
+        uses: $/.github/actions/terraform-apply
+        with:
+          working_directory: ${{ inputs.working_directory }}
+          terraform_version: ${{ inputs.terraform_version }}
