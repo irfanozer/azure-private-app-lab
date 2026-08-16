@@ -41,6 +41,27 @@ function Invoke-AzTsv {
     return ($value | Out-String).Trim()
 }
 
+# Azure CLI returns a nonzero exit code when an object does not exist. That is
+# expected during an idempotent first-run check, but Windows PowerShell can turn
+# native stderr into a terminating NativeCommandError when
+# $ErrorActionPreference is Stop. Temporarily use Continue only for these
+# existence probes, discard their expected error output, and return a Boolean.
+function Test-AzObjectExists {
+    param([string[]]$AzArguments)
+
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        & az @AzArguments --only-show-errors --output none 2>$null
+        $commandExitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+
+    return $commandExitCode -eq 0
+}
+
 function Ensure-RoleAssignment {
     param(
         [string]$PrincipalId,
@@ -77,14 +98,14 @@ function Ensure-FederatedCredential {
         [string]$Subject
     )
 
-    & az identity federated-credential show `
-        --name $CredentialName `
-        --identity-name $IdentityName `
-        --resource-group $ResourceGroupName `
-        --only-show-errors `
-        --output none 2>$null
+    $credentialExists = Test-AzObjectExists -AzArguments @(
+        'identity', 'federated-credential', 'show',
+        '--name', $CredentialName,
+        '--identity-name', $IdentityName,
+        '--resource-group', $ResourceGroupName
+    )
 
-    if ($LASTEXITCODE -ne 0) {
+    if (-not $credentialExists) {
         Write-Host "Creating federated credential '$CredentialName' for $Subject"
         & az identity federated-credential create `
             --name $CredentialName `
@@ -165,13 +186,13 @@ Assert-LastExitCode 'creating the bootstrap resource group'
     --output none
 Assert-LastExitCode 'creating the lab resource group'
 
-& az storage account show `
-    --name $StateStorageAccount `
-    --resource-group $BootstrapResourceGroup `
-    --only-show-errors `
-    --output none 2>$null
+$stateAccountExists = Test-AzObjectExists -AzArguments @(
+    'storage', 'account', 'show',
+    '--name', $StateStorageAccount,
+    '--resource-group', $BootstrapResourceGroup
+)
 
-if ($LASTEXITCODE -ne 0) {
+if (-not $stateAccountExists) {
     Write-Host "Creating Terraform state account $StateStorageAccount..."
     & az storage account create `
         --name $StateStorageAccount `
@@ -209,13 +230,13 @@ $StateAccountKey = $null
 
 Write-Host 'Creating user-assigned managed identities...'
 foreach ($identityName in @($PlanIdentityName, $ApplyIdentityName)) {
-    & az identity show `
-        --name $identityName `
-        --resource-group $BootstrapResourceGroup `
-        --only-show-errors `
-        --output none 2>$null
+    $identityExists = Test-AzObjectExists -AzArguments @(
+        'identity', 'show',
+        '--name', $identityName,
+        '--resource-group', $BootstrapResourceGroup
+    )
 
-    if ($LASTEXITCODE -ne 0) {
+    if (-not $identityExists) {
         & az identity create `
             --name $identityName `
             --resource-group $BootstrapResourceGroup `
