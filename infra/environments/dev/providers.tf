@@ -1,5 +1,12 @@
 provider "azurerm" {
-  features {}
+  features {
+    # The GitHub-hosted runner has no network route to private Storage data
+    # endpoints. Manage this account through ARM and skip AzureRM's Blob/Queue
+    # data-plane availability probe during create and refresh.
+    storage {
+      data_plane_available = false
+    }
+  }
 
   # Bootstrap registers only the namespaces this lab uses. Prevent AzureRM 4.x
   # from trying to register its much larger legacy provider set at subscription

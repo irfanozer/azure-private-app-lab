@@ -36,9 +36,9 @@ variable "environment" {
 }
 
 variable "app_service_sku_name" {
-  description = "Linux App Service Plan SKU. B1 keeps the lab relatively inexpensive while supporting VNet integration and Private Endpoint."
+  description = "Linux App Service Plan SKU supporting VNet integration and Private Endpoint."
   type        = string
-  default     = "B1"
+  default     = "P0v4"
 }
 
 variable "enable_private_dns_resolver" {
