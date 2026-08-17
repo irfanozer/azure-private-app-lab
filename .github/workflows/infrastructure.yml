@@ -18,7 +18,7 @@ on:
   workflow_dispatch:
     inputs:
       operation:
-        description: Plan is free of changes; apply creates billable Azure resources after approval
+        description: Plan previews changes; apply creates billable Azure resources after approval
         required: true
         type: choice
         default: plan

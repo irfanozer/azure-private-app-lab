@@ -49,8 +49,7 @@ module "private_dns" {
   virtual_network_id  = module.network.virtual_network_id
 
   zones = {
-    app_service = "privatelink.azurewebsites.net"
-    blob        = "privatelink.blob.core.windows.net"
+    blob = "privatelink.blob.core.windows.net"
   }
 
   tags = local.common_tags
@@ -65,58 +64,24 @@ module "storage" {
   tags                = local.common_tags
 }
 
-module "app_service_plan" {
-  source = "../../modules/app-service-plan"
+module "web_vm" {
+  source = "../../modules/linux-web-vm"
 
-  name                = "asp-${local.base_name}"
-  resource_group_name = data.azurerm_resource_group.lab.name
-  location            = data.azurerm_resource_group.lab.location
-  sku_name            = var.app_service_sku_name
-  tags                = local.common_tags
+  name                 = "vm-${local.base_name}"
+  resource_group_name  = data.azurerm_resource_group.lab.name
+  location             = data.azurerm_resource_group.lab.location
+  subnet_id            = module.network.compute_subnet_id
+  size                 = var.vm_size
+  storage_account_name = module.storage.name
+  tags                 = local.common_tags
 }
 
-# Calling the same child module twice with different parameters is the
-# Terraform equivalent of instantiating the same reusable component twice.
-module "reader_app" {
-  source = "../../modules/web-app"
-
-  name                       = "app-reader-${local.base_name}"
-  resource_group_name        = data.azurerm_resource_group.lab.name
-  location                   = data.azurerm_resource_group.lab.location
-  service_plan_id            = module.app_service_plan.id
-  vnet_integration_subnet_id = module.network.app_integration_subnet_id
-  storage_account_name       = module.storage.name
-  access_level               = "read"
-  tags                       = local.common_tags
-}
-
-module "writer_app" {
-  source = "../../modules/web-app"
-
-  name                       = "app-writer-${local.base_name}"
-  resource_group_name        = data.azurerm_resource_group.lab.name
-  location                   = data.azurerm_resource_group.lab.location
-  service_plan_id            = module.app_service_plan.id
-  vnet_integration_subnet_id = module.network.app_integration_subnet_id
-  storage_account_name       = module.storage.name
-  access_level               = "read-write"
-  tags                       = local.common_tags
-}
-
-# ARM Reader/Contributor roles do not grant Blob data access. These are data-
-# plane roles scoped to one storage account and to one workload identity each.
-resource "azurerm_role_assignment" "reader_blob_data" {
-  scope                            = module.storage.id
-  role_definition_name             = "Storage Blob Data Reader"
-  principal_id                     = module.reader_app.principal_id
-  principal_type                   = "ServicePrincipal"
-  skip_service_principal_aad_check = true
-}
-
-resource "azurerm_role_assignment" "writer_blob_data" {
+# ARM Reader/Contributor roles do not grant Blob data access. This is a data-
+# plane role scoped to one Storage account and the VM workload identity.
+resource "azurerm_role_assignment" "vm_blob_data" {
   scope                            = module.storage.id
   role_definition_name             = "Storage Blob Data Contributor"
-  principal_id                     = module.writer_app.principal_id
+  principal_id                     = module.web_vm.principal_id
   principal_type                   = "ServicePrincipal"
   skip_service_principal_aad_check = true
 }
@@ -134,20 +99,6 @@ module "private_endpoints" {
       private_connection_resource_id = module.storage.id
       subresource_names              = ["blob"]
       private_dns_zone_ids           = [module.private_dns.zone_ids["blob"]]
-    }
-
-    reader_app = {
-      name                           = "pe-reader-${local.base_name}"
-      private_connection_resource_id = module.reader_app.id
-      subresource_names              = ["sites"]
-      private_dns_zone_ids           = [module.private_dns.zone_ids["app_service"]]
-    }
-
-    writer_app = {
-      name                           = "pe-writer-${local.base_name}"
-      private_connection_resource_id = module.writer_app.id
-      subresource_names              = ["sites"]
-      private_dns_zone_ids           = [module.private_dns.zone_ids["app_service"]]
     }
   }
 
@@ -168,4 +119,3 @@ module "private_dns_resolver" {
   forwarding_target_ips  = var.forwarding_target_ips
   tags                   = local.common_tags
 }
-

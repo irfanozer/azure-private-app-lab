@@ -164,7 +164,7 @@ if (-not $OutputPath) {
 $OutputPath = [System.IO.Path]::GetFullPath($OutputPath)
 
 Write-Host 'Registering Azure resource providers used by the lab...'
-foreach ($providerNamespace in @('Microsoft.ManagedIdentity', 'Microsoft.Network', 'Microsoft.Storage', 'Microsoft.Web')) {
+foreach ($providerNamespace in @('Microsoft.Compute', 'Microsoft.ManagedIdentity', 'Microsoft.Network', 'Microsoft.Storage')) {
     & az provider register --namespace $providerNamespace --wait --only-show-errors
     Assert-LastExitCode "registering $providerNamespace"
 }

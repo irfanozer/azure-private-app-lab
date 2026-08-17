@@ -8,14 +8,17 @@ for current numbers before applying.
 
 | Resource | Cost behavior | Why it exists |
 |---|---|---|
-| Linux App Service Plan B1 | Continuously billed | Managed compute and Elastic Beanstalk analogue |
-| Three Private Endpoints | Hourly plus data | Private ingress for Blob and two web apps |
+| Linux VM (`Standard_F1als_v7` by default) | Billed while allocated | Browser-visible Nginx compute and EC2-style IaaS lesson |
+| Managed OS disk | Capacity based, including when VM is stopped | Persistent Ubuntu operating-system disk |
+| Standard Public IPv4 | Can be billed while allocated | Explicit inbound HTTP and outbound package path |
+| One Blob Private Endpoint | Hourly plus data | Private Storage data-plane path |
 | Standard LRS Storage | Capacity/operations | Application Storage account |
-| Private DNS zones | Zone/query based | Correct private service-name resolution |
+| One Private DNS zone | Zone/query based | Correct private Blob name resolution |
 | Terraform state Storage | Very small capacity/operations | Shared state and locking |
 
-Both web apps share one App Service Plan. The second app does not create a
-second plan charge, although both apps share the plan's capacity.
+Stopping/deallocating the VM stops its compute charge, but the managed disk,
+Public IP, Private Endpoint, Storage, and DNS can still be billed. Terraform
+destroy is the reliable end-of-lab cleanup.
 
 ## Optional expensive resources
 
@@ -53,4 +56,3 @@ groups directly removes the Azure resources but leaves Terraform state stale
 until the state account is also deleted.
 
 Never reuse this cleanup pattern for a shared or production resource group.
-

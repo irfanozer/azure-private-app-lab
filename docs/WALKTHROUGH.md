@@ -1,337 +1,298 @@
 # Why every step exists
 
-This document follows one run from initial bootstrap to Azure resources. The
-main design principle is to give each layer one responsibility.
+This document follows one run from bootstrap to a browser-visible Azure VM.
+Each layer has one responsibility: GitHub orchestrates, Entra authenticates,
+Azure RBAC authorizes, Terraform declares resources, and Azure networking moves
+traffic.
 
 ## 1. Bootstrap the trust and state layer
 
-The bootstrap script is run once by a human with elevated Azure permissions.
-This is the unavoidable trust bootstrap: GitHub cannot use OIDC until an Azure
-identity already exists and trusts GitHub.
+Bootstrap runs once as a human with elevated Azure permissions. GitHub cannot
+use OIDC until an Azure identity already exists and trusts GitHub, so this small
+first step cannot be performed by the new pipeline itself.
 
-### Bootstrap resource group
+The bootstrap resource group contains:
 
-It contains the long-lived deployment identities and Terraform backend. It is
-separate from the lab resource group so a Terraform destroy cannot delete its
-own identity or state halfway through execution.
+- An Azure Storage account and Blob container for Terraform state
+- A plan user-assigned managed identity
+- An apply user-assigned managed identity
+- One GitHub federated credential on each identity
+- The Azure role assignments needed by those identities
 
-### Azure Blob backend
+It is separate from the lab resource group. Terraform can therefore destroy
+the workload without deleting its own state or deployment identity midway.
 
-Local state is unsafe for a shared pipeline. Azure Blob provides centralized
-state, locking through blob leases, and consistency checking. The state account
-is reachable from GitHub-hosted runners but:
+### Why the backend uses Blob Data Contributor
 
-- Blob public access is disabled.
-- Shared-key access is disabled after the one-time container bootstrap.
-- Authentication uses Entra ID and OIDC.
-- Each GitHub identity is scoped to only the state container.
+Terraform state operations use the Blob **data plane**. Even plan must read and
+refresh state and acquire a Blob lease for locking, so both deployment
+identities need `Storage Blob Data Contributor` on the state container.
+Ordinary Azure `Contributor` is a management-plane role and is not enough for
+Blob data.
 
-The backend needs `Storage Blob Data Contributor`, not ordinary Azure
-`Contributor`, because state operations use the Blob data plane. It also needs
-write operations for its lease/lock, even when Terraform is producing a plan.
-[HashiCorp documents these backend permissions](https://developer.hashicorp.com/terraform/language/backend/azurerm#storage-account-required-role-assignments).
+The state account accepts Entra authentication, has shared-key access disabled,
+and contains no GitHub client secret.
 
-### Two GitHub deployment identities
+### Why there are two deployment identities
 
 | Identity | Lab resource group | State container | Purpose |
 |---|---|---|---|
-| Plan UAMI | Reader | Blob Data Contributor | Refresh state and calculate changes |
-| Apply UAMI | Contributor + RBAC Administrator | Blob Data Contributor | Create/delete resources and assign workload roles |
+| Plan UAMI | Reader | Blob Data Contributor | Inspect Azure and calculate changes |
+| Apply UAMI | Contributor + RBAC Administrator | Blob Data Contributor | Change resources and assign the VM role |
 
-`Contributor` cannot create role assignments. This example creates Blob roles
-for App Service identities, so the apply identity additionally receives **Role
-Based Access Control Administrator** at the lab resource-group scope—not the
-whole subscription.
+`Contributor` cannot create role assignments. The apply identity therefore
+also has `Role Based Access Control Administrator`, scoped only to the lab
+resource group.
+
+These are deployment identities for GitHub. They are different from the VM's
+system-assigned workload identity.
 
 ### Federated identity credentials
 
-The two Azure identities trust these GitHub OIDC subjects:
+The identities trust these exact GitHub OIDC subjects:
 
 ```text
 repo:OWNER/REPOSITORY:environment:terraform-plan
 repo:OWNER/REPOSITORY:environment:development
 ```
 
-Both use:
-
-```text
-issuer   = https://token.actions.githubusercontent.com
-audience = api://AzureADTokenExchange
-```
-
-GitHub gets a short-lived signed token. Entra validates issuer, audience, and
-subject, then issues an Azure access token for the matching managed identity.
-There is no stored password to rotate. `id-token: write` only allows requesting
-the GitHub token; Azure RBAC decides what the resulting identity can do.
+GitHub creates a short-lived signed OIDC token. Microsoft Entra checks its
+issuer, audience, and subject and exchanges it for an Azure access token for
+the matching identity. Azure RBAC then determines what that identity can do.
 
 ## 2. Configure GitHub's control layer
 
-The GitHub configuration script creates two Environments:
+`configure-github.ps1` creates two GitHub Environments:
 
 - `terraform-plan` selects the read-oriented Azure identity.
 - `development` selects the write identity and should require approval.
 
-Environment protection happens before the apply job begins. Therefore the
-write-capable job cannot obtain its OIDC token until the reviewer approves it.
+It also creates repository variables containing tenant ID, subscription ID,
+client IDs, resource-group name, and state settings. These are identifiers, not
+passwords. There is no `AZURE_CLIENT_SECRET`.
 
-Tenant IDs, subscription IDs, client IDs, resource-group names, and Storage
-account names are identifiers rather than passwords. They are repository
-variables. There is no `AZURE_CLIENT_SECRET`.
+The repository already exists; a GitHub **Environment** is a deployment-policy
+object inside that repository. It can enforce approval, branch restrictions,
+wait timers, and environment-scoped values.
 
-## 3. The thin caller workflow
+## 3. Workflow execution order
 
-[`infrastructure.yml`](../.github/workflows/infrastructure.yml) owns only the
-repository-specific concerns:
-
-- Triggers and path filters
-- Plan versus apply choice
-- Terraform directory/version
-- Environment and state names
-- The maximum `GITHUB_TOKEN` permissions
-- Concurrency for this state
-
-The key line is job-level `uses`:
-
-```yaml
-jobs:
-  terraform:
-    uses: $/.github/workflows/reusable-azure-terraform.yml
+```text
+push or Run workflow
+→ thin caller workflow
+→ reusable workflow
+→ validate job
+→ plan job using plan OIDC identity
+→ save exact plan artifact
+→ wait for development approval
+→ apply job using apply OIDC identity
+→ apply the saved plan
+→ cloud-init installs Nginx on the VM
 ```
 
-Job-level `uses` calls a reusable workflow. Because it is not a normal runner
-job, the caller does not contain `runs-on` or `steps`.
-
-The concurrency group covers plan, approval, and apply. A second run cannot
-change state while someone is reviewing the first run's plan, and
-`cancel-in-progress: false` avoids terminating Terraform in the middle of an
-apply.
-
-## 4. The reusable workflow
-
-[`reusable-azure-terraform.yml`](../.github/workflows/reusable-azure-terraform.yml)
-is the centrally maintainable policy and orchestration layer.
+The caller owns the trigger and repository-specific inputs. Its job-level
+`uses` calls the reusable workflow. The reusable workflow owns jobs, runners,
+environments, authentication, and ordering. Composite actions are invoked at
+step level to package repeated operations such as Terraform validation or
+planning.
 
 ### Validate job
 
-This job receives no Azure identity. It checks formatting, downloads the locked
-providers, initializes with `-backend=false`, and validates the Terraform
-configuration. Syntax errors should not require cloud credentials.
+Validation receives no Azure identity. It checks formatting, initializes
+without the remote backend, and validates the configuration.
 
 ### Plan job
 
-The plan job:
-
-1. Rejects cloud access for untrusted fork pull requests.
-2. Targets the `terraform-plan` Environment, which determines its OIDC subject.
-3. Grants only `contents: read` and `id-token: write` to `GITHUB_TOKEN`.
-4. Uses the internal OIDC action, which calls Microsoft's `azure/login` action.
-5. Calls the internal plan action with parameters.
-6. Archives the initialized workspace and saved plan for one day.
-
-Terraform plan files can contain sensitive values. They should not be published
-or retained indefinitely.
+Plan enters the `terraform-plan` Environment, requests a GitHub OIDC token,
+logs in as the plan UAMI, reads remote state, refreshes existing Azure objects,
+and calculates a saved plan. It does not make the planned Azure changes.
 
 ### Apply job
 
-The apply job exists only for `apply` or `destroy`. It:
+Apply runs only after the protected `development` Environment is approved. It
+logs in as the separate apply UAMI and applies the exact saved `tfplan`; it does
+not generate a different plan after approval.
 
-1. Waits for the plan job.
-2. Waits for the protected `development` Environment.
-3. Obtains the separate write identity through OIDC.
-4. Downloads the artifact from the same workflow run.
-5. Applies the exact saved `tfplan` rather than creating a new plan.
+## 4. Terraform root and child modules
 
-This creates a meaningful review boundary: the approved plan and applied plan
-are the same file with the same initialized providers and modules.
-
-## 5. Internal composite actions
-
-The reusable workflow controls jobs. Composite actions package repeatable
-steps inside those jobs.
-
-| Composite action | Repeated responsibility |
-|---|---|
-| `azure-oidc-login` | Standard company OIDC login and session check |
-| `terraform-check` | Install, format check, backend-free init, validate |
-| `terraform-plan` | Backend init and normal/destroy saved plan |
-| `terraform-apply` | Install exact CLI and apply saved plan |
-
-They receive values through `with:` parameters. Shell values are first placed
-in environment variables and quoted, rather than interpolating an expression
-directly into a command.
-
-These are internally authored composite actions, but they call vendor actions:
-
-- `azure/login`
-- `hashicorp/setup-terraform`
-- `actions/checkout`
-- `actions/upload-artifact` and `actions/download-artifact`
-
-Vendor versus internal is an ownership/trust classification. It is not a
-GitHub action implementation type.
-
-## 6. Terraform root and child modules
-
-[`infra/environments/dev`](../infra/environments/dev) is the **root module**.
-It chooses environment-specific values and composes child modules.
+`infra/environments/dev` is the root module:
 
 ```text
 root module
-├── network module
-├── private DNS module
-├── storage module
-├── App Service Plan module
-├── web-app module (reader instance)
-├── web-app module (writer instance)
-├── private-endpoints module
-└── private-DNS-resolver module (optional)
+├── network
+├── linux-web-vm
+├── storage
+├── private-dns
+├── private-endpoints
+└── private-dns-resolver (optional)
 ```
 
-The web-app child module is instantiated twice with different parameters. Each
-call has its own Terraform resource address and Azure managed identity.
+The root chooses names and environment values. Child modules implement reusable
+components. Providers are separate plugins that translate Terraform operations
+into Azure API calls.
 
-Terraform does not execute modules top to bottom. References such as
-`module.storage.id` and `module.network.private_endpoint_subnet_id` form one
-dependency graph. Independent resources may be created concurrently.
+Terraform follows references to build a dependency graph. Independent objects
+may be created in parallel; file order does not define execution order.
 
-## 7. VNet and subnet separation
+## 5. VM networking
 
-The lab uses `10.42.0.0/16` with these subnets:
+The VNet address space is `10.42.0.0/16`:
 
-| Subnet | Prefix | Why separate? |
+| Subnet | Prefix | Purpose |
 |---|---|---|
-| App integration | `10.42.0.0/26` | Delegated to `Microsoft.Web/serverFarms`; App Service outbound path |
-| Private Endpoints | `10.42.1.0/27` | Contains inbound Private Endpoint NICs |
-| Resolver inbound | `10.42.3.0/28` | Optional, dedicated `Microsoft.Network/dnsResolvers` subnet |
-| Resolver outbound | `10.42.3.16/28` | Optional, separate resolver delegation |
+| Compute | `10.42.0.0/26` | Contains the VM network interface |
+| Private Endpoints | `10.42.1.0/27` | Contains the private IP mapped to Storage Blob |
+| Resolver inbound | `10.42.3.0/28` | Optional DNS queries entering Azure |
+| Resolver outbound | `10.42.3.16/28` | Optional DNS forwarding leaving Azure |
 
-App Service Private Endpoint and VNet integration solve opposite directions:
+The VM is IaaS: its NIC really is attached to the compute subnet. This differs
+from multitenant App Service, where VNet integration merely gives an outbound
+path to workers hosted outside the VNet.
+
+### Browser traffic
 
 ```text
-Client → Private Endpoint → Web App       inbound
-Web App → VNet integration → Storage PE  outbound
+Browser
+→ static Public IP
+→ VM network interface
+→ NSG allows TCP 80
+→ Nginx on the VM
 ```
 
-They cannot share a subnet. [Microsoft's App Service networking documentation](https://learn.microsoft.com/en-us/azure/app-service/overview-vnet-integration)
-explains the outbound integration model.
+The NSG explicitly allows HTTP 80 from the Internet and denies SSH 22. Azure's
+default rules deny other unsolicited Internet traffic. The public IP is also
+the VM's explicit outbound path for downloading Ubuntu packages during
+cloud-init.
 
-## 8. App Service as the Elastic Beanstalk analogue
+### Storage traffic
 
-The B1 Linux App Service Plan is the managed compute pool. Both web apps run in
-the same plan, just as several apps can share App Service Plan capacity.
+```text
+VM application
+→ asks DNS for STORAGE.blob.core.windows.net
+→ linked Private DNS zone returns the Blob Private Endpoint IP
+→ VM routes inside the VNet to snet-private-endpoints
+→ Private Link maps that IP to this exact Storage account's blob subresource
+→ Storage validates the VM's Entra token and Blob data role
+```
 
-Each web app:
+Three checks are independent:
 
-- Runs a public Nginx image so no private SCM deployment path is initially
-  required.
-- Disables public inbound access.
-- Disables FTP and WebDeploy basic authentication.
-- Requires HTTPS/TLS 1.2.
-- Uses a system-assigned managed identity.
-- Uses the delegated subnet for outbound VNet integration.
-- Receives its own Private Endpoint for inbound traffic.
+1. DNS must return the intended private IP.
+2. Routing and network rules must allow the connection.
+3. Identity and RBAC must authorize the requested Blob operation.
 
-The Private Endpoint is not a deployment mechanism. A future source deployment
-to private SCM/Kudu needs a VNet-connected runner or another deliberately
-secured path. OIDC solves authentication, not network reachability.
+OIDC and RBAC do not create network reachability, and successful networking
+does not grant authorization.
 
-## 9. Managed identities and least-privilege RBAC
+## 6. VM, Nginx, and cloud-init
 
-The reader and writer apps have different system-assigned identities:
+Terraform creates:
 
-- Reader: `Storage Blob Data Reader`
-- Writer: `Storage Blob Data Contributor`
+- A Standard static Public IPv4 address
+- A Network Security Group
+- A network interface in `snet-compute`
+- An Ubuntu Server 24.04 LTS Gen2 VM using `Standard_F1als_v7`
+- A Standard LRS managed OS disk
+- A system-assigned managed identity
 
-The assignment is scoped to one Storage account. Azure `Reader`, `Contributor`,
-and `Storage Account Contributor` are control-plane roles and do not grant Blob
-data access.
+`Standard_F1als_v7` uses an NVMe disk controller. Trusted Launch features
+enable Secure Boot and virtual TPM. Cloud-init installs Nginx and replaces its
+default page with the lab success page.
 
-The baseline Nginx image does not call Storage; it keeps the first lab focused
-on infrastructure, identity issuance, and RBAC configuration. Exercising both
-data roles from application code or a VNet-connected test container is a
-natural follow-up lab.
+Terraform must supply an administrator credential to Azure. This disposable
+lab generates a strong password into protected Terraform state, does not output
+it, exposes no SSH rule, and locks the local administrator password after
+cloud-init. Use Azure Run Command for diagnostics. In production, prefer a
+managed access solution and an approved SSH/Entra policy.
 
-There is no practical built-in Blob “write-only” role. Writing commonly needs
-read/list/ETag operations; Blob Data Contributor includes read, write, and
-delete. A custom write-only role can be constructed, but it is frequently
-unusable and would require extra privilege to create. Separate workload
-identities and the narrowest resource scope are the more useful lesson.
+Terraform can report VM creation before cloud-init finishes. Wait two to five
+minutes before treating the first HTTP failure as a network problem.
 
-The system-assigned identity's **principal ID** is used in role assignments.
-A client ID is used when software explicitly selects a user-assigned identity.
+## 7. Managed identity and workload RBAC
 
-## 10. Private Endpoint and Private DNS
+When Azure creates the VM, it also creates a system-assigned identity tied to
+that VM's lifecycle. Terraform reads its principal/object ID and creates:
 
-Three Private Endpoints bring these service interfaces into the VNet:
+```text
+principal: VM system-assigned identity
+role:      Storage Blob Data Contributor
+scope:     this one application Storage account
+```
 
-- Storage Blob: subresource `blob`
-- Reader App Service: subresource `sites`
-- Writer App Service: subresource `sites`
+That role permits Blob read, write, and delete data operations. It does not make
+the VM a Contributor on the resource group or subscription.
 
-Matching zones are:
+The public Nginx page is deliberately static, so HTTP verification proves the
+VM and inbound network path, not Blob authorization. A follow-up exercise can
+use Azure Run Command from the VM to obtain a managed-identity token and access
+Blob through the private endpoint.
+
+## 8. Private Endpoint and Private DNS
+
+A Private Endpoint is a NIC-like private IP in `snet-private-endpoints` mapped
+to one Azure PaaS resource and subresource. In this lab it maps only to the
+Storage account's `blob` subresource. It does not move the Storage service into
+the VNet.
+
+The private DNS zone is:
 
 ```text
 privatelink.blob.core.windows.net
-privatelink.azurewebsites.net
 ```
 
-Each zone is linked to the VNet. Each endpoint has a
-`private_dns_zone_group`, so Azure manages the required A records. For App
-Service this includes the SCM/Kudu record.
+It is linked to the VNet. The endpoint's DNS zone group lets Azure manage the A
+record. Workloads continue using the normal Storage hostname; DNS follows its
+CNAME into the `privatelink` zone and returns the private address.
 
-Clients still use the normal service hostname. Public DNS returns a CNAME into
-the `privatelink` namespace; a client using the linked VNet's DNS receives the
-private A record. [Microsoft publishes the authoritative service-to-zone table](https://learn.microsoft.com/en-us/azure/private-link/private-endpoint-dns).
+The Storage account's public network access is disabled explicitly. A Private
+Endpoint alone does not universally disable a service's public endpoint.
 
-The Storage module intentionally does not create a container or blob. Those are
-data-plane operations and a public GitHub-hosted runner cannot reach the
-private-only Blob endpoint. A VNet-connected workload can create data later.
+## 9. DNS Private Resolver
 
-## 11. DNS Private Resolver
+Private DNS Resolver is disabled by default because a zone linked directly to
+this single VNet already resolves correctly.
 
-Linked Private DNS zones already answer queries for this VNet. DNS Private
-Resolver is for hybrid or centralized DNS:
+- The **inbound endpoint** lets on-premises or another connected network forward
+  Azure-private DNS questions to Azure.
+- The **outbound endpoint plus ruleset** lets Azure forward selected suffixes to
+  reachable custom or on-premises DNS servers.
 
-- **Inbound endpoint:** on-premises/other-network DNS forwards Azure-private
-  queries to its private IP.
-- **Outbound endpoint and ruleset:** Azure conditionally forwards a suffix such
-  as `corp.example.com.` to custom/on-premises DNS servers.
-- **VNet link:** makes a forwarding ruleset available to a VNet.
+Resolver moves DNS questions only. It does not create the VPN, ExpressRoute,
+peering, route, or application connection needed after a name resolves.
 
-The module creates both endpoint types and an empty forwarding ruleset when
-enabled. Add a real forwarding rule only when you have a reachable DNS target;
-a fake target proves resource creation but not DNS behavior.
+## 10. What verification proves
 
-Resolver endpoint subnets must be dedicated, delegated, and between /28 and
-/24. The resolver and VNet must be in the same region. See [Azure DNS Private
-Resolver constraints](https://learn.microsoft.com/en-us/azure/dns/dns-private-resolver-overview).
+`verify-azure.ps1` shows:
 
-## 12. What verification proves
+- Bootstrap state and OIDC identities
+- Terraform-created resources
+- Private Endpoint approval and Private DNS zone
+- VM power state, public/private IPs, and managed identity
+- The HTTP NSG rule and absence of an SSH allow rule
+- The VM's Blob data role assignment
+- The browser URL and an HTTP status test
 
-The included verification script proves management-plane configuration:
-
-- Resources exist.
-- Private Endpoint connections are approved.
-- Private DNS zones and records exist.
-- Public network access is disabled.
-- Managed identities have principal IDs.
-
-It cannot prove the data path from a public workstation. A complete private
-test requires a VNet-connected VM, container, runner, or hybrid network. That is
-a good next hands-on extension rather than leaving another continuously billed
-test resource in the baseline.
+If HTTP fails, troubleshoot in this order: VM running state, cloud-init/Nginx,
+Public IP, NSG rule, then guest firewall. For private Storage, troubleshoot DNS,
+route, endpoint approval, then identity/RBAC.
 
 ## AWS mental mapping
 
-| This lab | Approximate AWS concept |
+| Azure lab concept | Approximate AWS concept |
 |---|---|
 | VNet/subnet | VPC/subnet |
-| App Service | Elastic Beanstalk managed application platform |
-| Private Endpoint | Interface VPC endpoint/PrivateLink endpoint |
+| Linux VM | EC2 instance |
+| VM system-assigned managed identity | EC2 instance profile/role |
+| User-assigned deployment identity | Reusable IAM role-like identity |
+| Federated credential | IAM role trust policy for GitHub OIDC |
+| Azure role assignment | IAM policy attachment plus a resource scope |
+| NSG | Security Group, with explicit deny/NACL-like features |
+| Standard Public IP | Elastic IP |
+| Blob Private Endpoint | Interface VPC endpoint/PrivateLink endpoint |
 | Private DNS zone link | Route 53 private hosted zone association |
-| DNS Private Resolver | Route 53 Resolver inbound/outbound endpoints |
-| User-assigned managed identity | Reusable IAM role-like workload identity |
-| System-assigned managed identity | Instance/task role tied to one resource lifecycle |
-| Federated credential | IAM role trust policy for an OIDC principal |
-| Azure role assignment | IAM policy attachment, with Azure scope hierarchy |
-| GitHub plan/apply identity | Separate read and deploy IAM roles |
+| DNS Private Resolver | Route 53 Resolver endpoints/rules |
+
+This VM is the closest match to EC2, not Elastic Beanstalk. Azure App Service
+remains the closer managed-platform analogue to Elastic Beanstalk; this lab
+uses a VM because the subscription's App Service regional-worker quota was
+zero.

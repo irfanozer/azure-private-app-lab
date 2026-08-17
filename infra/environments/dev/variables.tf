@@ -35,10 +35,10 @@ variable "environment" {
   }
 }
 
-variable "app_service_sku_name" {
-  description = "Linux App Service Plan SKU supporting VNet integration and Private Endpoint."
+variable "vm_size" {
+  description = "NVMe-capable Gen2 Linux VM size. It must be available in the lab resource group's region and within the subscription's Compute quota."
   type        = string
-  default     = "P0v4"
+  default     = "Standard_F1als_v7"
 }
 
 variable "enable_private_dns_resolver" {
@@ -75,4 +75,3 @@ variable "tags" {
   type        = map(string)
   default     = {}
 }
-

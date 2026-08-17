@@ -13,8 +13,7 @@ resource "azurerm_private_endpoint" "this" {
     is_manual_connection           = false
   }
 
-  # Azure manages the A records. For App Service this also handles the SCM/Kudu
-  # record required by private deployments.
+  # Azure manages the matching private DNS A records for the endpoint.
   private_dns_zone_group {
     name                 = "default"
     private_dns_zone_ids = each.value.private_dns_zone_ids
@@ -22,4 +21,3 @@ resource "azurerm_private_endpoint" "this" {
 
   tags = var.tags
 }
-

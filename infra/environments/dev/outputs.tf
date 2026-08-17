@@ -9,26 +9,18 @@ output "virtual_network_id" {
 }
 
 output "storage_account_name" {
-  description = "Private Storage account used by the example workloads."
+  description = "Private Storage account authorized for the VM workload identity."
   value       = module.storage.name
 }
 
-output "reader_app" {
-  description = "Reader web app details. The hostname resolves privately from the linked VNet."
+output "web_vm" {
+  description = "Browser-accessible Linux VM and its workload identity."
   value = {
-    name         = module.reader_app.name
-    hostname     = module.reader_app.default_hostname
-    principal_id = module.reader_app.principal_id
-    access_role  = "Storage Blob Data Reader"
-  }
-}
-
-output "writer_app" {
-  description = "Writer web app details. Storage Blob Data Contributor includes read, write, and delete."
-  value = {
-    name         = module.writer_app.name
-    hostname     = module.writer_app.default_hostname
-    principal_id = module.writer_app.principal_id
+    name         = module.web_vm.name
+    public_ip    = module.web_vm.public_ip_address
+    private_ip   = module.web_vm.private_ip_address
+    browser_url  = module.web_vm.http_url
+    principal_id = module.web_vm.principal_id
     access_role  = "Storage Blob Data Contributor"
   }
 }
@@ -47,4 +39,3 @@ output "dns_resolver_inbound_ip" {
   description = "Inbound resolver IP when the optional hybrid-DNS lab is enabled."
   value       = try(module.private_dns_resolver[0].inbound_ip_address, null)
 }
-

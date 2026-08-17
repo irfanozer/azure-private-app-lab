@@ -3,9 +3,9 @@ output "virtual_network_id" {
   value       = azurerm_virtual_network.this.id
 }
 
-output "app_integration_subnet_id" {
-  description = "Delegated subnet used for App Service outbound VNet integration."
-  value       = azurerm_subnet.app_integration.id
+output "compute_subnet_id" {
+  description = "Subnet containing the Linux VM NIC."
+  value       = azurerm_subnet.compute.id
 }
 
 output "private_endpoint_subnet_id" {
@@ -22,4 +22,3 @@ output "dns_resolver_outbound_subnet_id" {
   description = "Dedicated outbound resolver subnet, or null when disabled."
   value       = try(azurerm_subnet.dns_resolver_outbound[0].id, null)
 }
-

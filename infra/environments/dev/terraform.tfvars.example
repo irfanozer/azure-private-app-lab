@@ -6,6 +6,7 @@ subscription_id    = "00000000-0000-0000-0000-000000000000"
 resource_group_name = "rg-ghazdemo-dev"
 name_prefix         = "ghazdemo"
 environment         = "dev"
+vm_size             = "Standard_F1als_v7"
 
 # This is intentionally false. Resolver inbound/outbound endpoints are billed
 # continuously and are not required for resources in the same linked VNet.
@@ -14,4 +15,3 @@ enable_private_dns_resolver = false
 tags = {
   owner = "your-name"
 }
-

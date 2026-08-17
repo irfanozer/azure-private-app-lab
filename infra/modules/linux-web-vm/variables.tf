@@ -1,5 +1,5 @@
 variable "name" {
-  description = "App Service Plan name."
+  description = "Linux VM name."
   type        = string
 }
 
@@ -13,8 +13,18 @@ variable "location" {
   type        = string
 }
 
-variable "sku_name" {
-  description = "App Service SKU."
+variable "subnet_id" {
+  description = "Compute subnet containing the VM NIC."
+  type        = string
+}
+
+variable "size" {
+  description = "Azure VM size."
+  type        = string
+}
+
+variable "storage_account_name" {
+  description = "Private Storage account authorized for the VM identity."
   type        = string
 }
 
@@ -23,4 +33,3 @@ variable "tags" {
   type        = map(string)
   default     = {}
 }
-

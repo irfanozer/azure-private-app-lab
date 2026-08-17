@@ -6,26 +6,23 @@ resource "azurerm_virtual_network" "this" {
   tags                = var.tags
 }
 
-# App Service regional VNet integration is outbound connectivity. Azure
-# requires a dedicated subnet delegated to Microsoft.Web/serverFarms.
-resource "azurerm_subnet" "app_integration" {
-  name                 = "snet-app-integration"
-  resource_group_name  = var.resource_group_name
-  virtual_network_name = azurerm_virtual_network.this.name
-  address_prefixes     = ["10.42.0.0/26"]
-
-  delegation {
-    name = "app-service-delegation"
-
-    service_delegation {
-      name    = "Microsoft.Web/serverFarms"
-      actions = ["Microsoft.Network/virtualNetworks/subnets/join/action"]
-    }
-  }
+# The VM lives directly in this subnet. Unlike App Service VNet integration,
+# an Azure VM has its own NIC in the VNet and needs no subnet delegation.
+resource "azurerm_subnet" "compute" {
+  name                            = "snet-compute"
+  resource_group_name             = var.resource_group_name
+  virtual_network_name            = azurerm_virtual_network.this.name
+  address_prefixes                = ["10.42.0.0/26"]
+  default_outbound_access_enabled = false
 }
 
-# Private Endpoint NICs are inbound paths to PaaS services. They cannot share
-# the App Service integration subnet.
+moved {
+  from = azurerm_subnet.app_integration
+  to   = azurerm_subnet.compute
+}
+
+# Private Endpoint NICs are private entry points to PaaS services. Keeping
+# them separate from compute makes routing and security policy easier to see.
 resource "azurerm_subnet" "private_endpoints" {
   name                 = "snet-private-endpoints"
   resource_group_name  = var.resource_group_name
@@ -71,4 +68,3 @@ resource "azurerm_subnet" "dns_resolver_outbound" {
     }
   }
 }
-

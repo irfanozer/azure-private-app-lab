@@ -21,7 +21,8 @@ platform-automation repository
 terraform-azure-modules repository or private registry
 ├── network/
 ├── private-dns/
-├── web-app/
+├── linux-web-vm/
+├── storage/
 └── private-endpoints/
 ```
 
@@ -128,4 +129,3 @@ Official references:
 - [Secure use of GitHub Actions](https://docs.github.com/en/actions/reference/security/secure-use)
 - [OIDC with reusable workflows](https://docs.github.com/en/actions/how-tos/secure-your-work/security-harden-deployments/oidc-with-reusable-workflows)
 - [Terraform modules](https://developer.hashicorp.com/terraform/language/modules)
-
